@@ -1,66 +1,67 @@
-# Attempt 2: Multi-scale chunking + Adaptive padding + Better ASR
+# Attempt 2: Answer Augmentation + HyDE + Better ASR
 
-## Score: attempt1 → 0.367, attempt2 → TBD (target: 0.45+)
+## Score progression
+| Version | Score | Key change |
+|---------|-------|------------|
+| v4 (attempt1) | 0.367 | 90s windows + Whisper Tiny + BGE-M3 |
+| v8 | 0.377 | + faster-whisper large-v3-turbo (8 GPU parallel retranscription) |
+| v9 | 0.289 | Multi-scale 171K chunks (too noisy, worse) |
+| v10 | 0.328 | Cascaded coarse+fine (lost VR@K) |
+| v11 | 0.470 | + answer_en augmentation from train data |
+| **v12** | **0.500** | **+ HyDE query expansion (1st place)** |
 
-## What changed from attempt1
+## What works (v12 = 0.500, 1st place)
 
-### Problem diagnosis
-Attempt1 used 90s sliding windows with fixed ±10s padding. This killed SR@K (Success Rate) because:
-- If ground truth is 15s and our window is 90s → IoU = 15/90 = 0.17 (fails IoU ≥ 0.5)
-- Fixed padding doesn't adapt to chunk granularity
-- Summary chunks (full video) polluted top results for SR
+### 1. Better ASR transcripts
+Replaced Whisper Tiny (WER ~30%) with faster-whisper large-v3-turbo (WER ~10%).
+Retranscribed all 436 audio files in parallel on 8x V100-32GB in ~40 min.
 
-### Key improvements
+### 2. Answer augmentation (+0.09 boost)
+Train data has `answer_en` — detailed text answers for each question.
+We add these answers as extra chunks in the index with the same (video_file, start, end).
+This makes the index "denser" — queries match answer-style text, not just raw transcripts.
 
-#### 1. Multi-scale chunking (`pipeline/chunker.py`)
-Instead of one window size, we index at 5 granularities simultaneously:
+**Why it works:** Questions ask "How to do X?" but transcripts say "First you take the...".
+The answer text bridges this semantic gap: "To do X, first you take the...".
 
-| Scale | Size | Padding | Purpose |
-|-------|------|---------|---------|
-| `sentence` | 3-10s (one ASR segment) | ±8s | Catch short GT fragments, maximize IoU |
-| `group3` | 10-20s (3 segments) | ±6s | Medium precision, natural speech boundaries |
-| `short` | 20s window / 10s overlap | ±4s | Short context matches |
-| `medium` | 45s window / 15s overlap | ±2s | Medium context matches |
-| `large` | 90s window / 30s overlap | ±0s | Long context + VR@K |
+### 3. HyDE query expansion (+0.03 boost)
+For each test query:
+1. Find the most similar train question (cosine similarity on BGE-M3)
+2. If similarity > 0.7: mix query embedding with that train answer's embedding
+3. Search with mixed embedding (0.6 * query + 0.4 * answer)
 
-Plus one `summary` chunk per video (full text, truncated to 3000 chars) for Video Recall.
+**Why it works:** The mixed embedding is semantically closer to the actual transcript
+content than the raw question. It's a form of Hypothetical Document Embedding (HyDE).
 
-#### 2. Adaptive padding (`search/retriever.py`)
-Each chunk carries its own `padding` value based on its scale. The retriever applies padding per-chunk:
-- Sentence (3-10s) → padded to ~20-26s → IoU with 15s GT ≈ 0.5+
-- Short window (20s) → padded to ~28s → IoU with 30s GT ≈ 0.6+
-- Large window (90s) → no padding → covers broad context
+### 4. Simple 90s window chunking (kept from v8)
+Multi-scale chunking (v9, v10) made things worse by diluting results.
+The simple 90s/30s sliding window with ±10s padding remains optimal.
 
-#### 3. Smart result ordering
-Summary chunks are deprioritized (moved to positions 4-5 only as fallback). Primary results come from sentence/group/window chunks which have better IoU potential.
-
-#### 4. Better ASR transcripts
-Replaced Whisper Tiny (WER ~30% on Russian) with faster-whisper large-v3-turbo (WER ~10%). Retranscribed all 436 audio files in parallel on 8x V100-32GB GPUs.
-
-#### 5. Video path normalization in evaluation
-`evaluate.py` now normalizes video paths (extracts `video_XXXX` ID) for comparison, preventing silent metric failures from path format mismatches.
-
-## Architecture
+## Architecture (v12)
 
 ```
-OFFLINE (indexing):
-  transcripts.pkl (faster-whisper large-v3-turbo)
-    → Multi-scale chunker:
-        sentence-level (3-10s each)     ← NEW: best for IoU
-        group3 (3 consecutive segments) ← NEW
-        short windows (20s/10s)         ← NEW
-        medium windows (45s/15s)        ← NEW
-        large windows (90s/30s)
-        video summary
+OFFLINE:
+  Audio files (436)
+    → faster-whisper large-v3-turbo (8 GPU parallel)
+    → new_transcripts.pkl (67K segments)
+
+  new_transcripts.pkl
+    → 90s/30s sliding window → 5010 window chunks
+    → train answer_en → +4466 answer augmentation chunks
+    → Total: 9476 chunks
     → BGE-M3 embeddings (1024d, normalized)
     → numpy pickle index
 
+  train_qa.csv
+    → BGE-M3 embeddings of question_en → train question index (for HyDE)
+
 ONLINE (<100ms per query):
   Query
-    → BGE-M3 encode (~20ms)
-    → Cosine similarity search top-50 (~1ms)
-    → Dedup + deprioritize summary chunks
-    → Adaptive padding per chunk scale
+    → BGE-M3 encode
+    → HyDE: find similar train question, mix with its answer embedding
+    → Cosine similarity search top-10
+    → Dedup by (video_file, chunk_index)
+    → ±10s padding
     → Return: 5 × (video_stem, start, end)
 ```
 
@@ -68,48 +69,57 @@ ONLINE (<100ms per query):
 
 ```
 attempt2/
-├── config.py              # All parameters
-├── ingest.py              # CLI: transcripts → chunks → embeddings → index
-├── evaluate.py            # Local eval with Kaggle metrics (SR@K, VR@K)
-├── submit.py              # Generate Kaggle submission CSV
+├── README.md
+├── config.py                  # Parameters
+├── run_v12.py                 # Complete v12 pipeline (score 0.500)
+├── ingest.py                  # Basic ingest (without answer aug)
+├── evaluate.py                # Local eval (SR@K, VR@K, FinalScore)
+├── submit.py                  # Basic submission generator
+├── retranscribe_parallel.py   # 8-GPU parallel retranscription
+├── merge_transcripts.py       # Merge per-GPU transcript files
 ├── pipeline/
-│   ├── chunker.py         # Multi-scale chunking (5 levels + summary)
-│   └── indexer.py         # BGE-M3 numpy index (build/load/search)
+│   ├── chunker.py             # Sliding window + multi-scale chunking
+│   └── indexer.py             # BGE-M3 numpy index
 └── search/
-    └── retriever.py       # Search with adaptive padding + reranker
+    └── retriever.py           # Search with adaptive padding
 ```
 
 ## Usage
 
 ```bash
-# 1. Ingest with new transcripts
-python ingest.py --transcripts new_transcripts.pkl --index index_v2.pkl
+# Step 1: Retranscribe audio (8 GPU parallel, ~40 min)
+for GPU in 0 1 2 3 4 5 6 7; do
+    CUDA_VISIBLE_DEVICES=$GPU python retranscribe_parallel.py $GPU 8 &
+done
+wait
+python merge_transcripts.py
 
-# 2. Evaluate locally
-python evaluate.py --sample 100
+# Step 2: Run v12 pipeline (ingest + HyDE search + submission)
+python run_v12.py
 
-# 3. Generate submission
-python submit.py --output submission_v2.csv
+# Step 3: Submit
+kaggle competitions submit ... -f submission_v12.csv
 ```
 
-## IoU math explanation
+## What didn't work
 
-Why multi-scale matters:
+| Approach | Score | Why it failed |
+|----------|-------|---------------|
+| Multi-scale 171K chunks (v9) | 0.289 | Sentence chunks flooded top-50 from same video, killed VR@K |
+| Cascaded coarse+fine (v10) | 0.328 | Only 5 unique videos in top-5, less diversity |
+| Removing summary chunks (v5) | 0.358 | Summary helped VR@K, removing it hurt |
+| Refinement to best segments (v7) | 0.330 | Over-narrowed windows, missed ground truth |
 
-```
-Ground truth:  |----15s----|
-Attempt1 90s:  |--------------------90s--------------------|  IoU = 15/90 = 0.17 ✗
-Sentence+pad:  |--8s--|---10s---|--8s--|                      IoU = 10/26 = 0.38 ~
-Group3+pad:    |--6s--|------15s------|--6s--|                 IoU = 15/27 = 0.55 ✓
-Short+pad:     |--4s--|--------20s--------|--4s--|            IoU = 15/28 = 0.53 ✓
-```
+## Key insight
 
-The key insight: **smaller chunks with appropriate padding produce predicted windows closer to ground truth size, dramatically improving IoU.**
+**Don't over-engineer chunking.** Simple 90s windows + answer augmentation + HyDE
+beats multi-scale, cascaded, and refinement approaches. The bottleneck is not
+chunk granularity — it's semantic matching quality between queries and index.
 
-## Next improvements (TODO)
-- [ ] HyDE (Hypothetical Document Embeddings) for query expansion
+## Next improvements (potential)
 - [ ] Spellcheck via Yandex.Speller API for typo handling
-- [ ] answer_en augmentation in index
-- [ ] Sparse (BM25) retrieval via BGE-M3 lexical weights + RRF fusion
+- [ ] Sparse (BM25) retrieval + RRF fusion with dense
+- [ ] Fine-tune BGE-M3 on train data (hard negative mining)
 - [ ] SigLIP visual search as second retrieval channel
+- [ ] Tune HyDE mixing weight (currently 0.6/0.4)
 - [ ] Boundary refinement via cosine similarity hills
