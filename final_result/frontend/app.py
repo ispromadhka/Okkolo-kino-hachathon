@@ -154,22 +154,6 @@ if is_searched:
         latency = meta.get('latency_ms', 0)
         st.markdown(f'<div class="stats-container-wrapper"><div class="search-stats-glass"><div style="color:#D3D3E0;">Latency: <span class="stats-highlight">{latency:.0f}ms</span> | Результатов: <span class="stats-highlight">{len(results)}</span></div></div></div>', unsafe_allow_html=True)
 
-        def fetch_video_bytes(video_id):
-            """Download video from backend and cache in session."""
-            cache_key = f"video_bytes_{video_id}"
-            if cache_key not in st.session_state:
-                try:
-                    r = requests.get(f"{BACKEND_URL}/video/{video_id}", timeout=30)
-                    if r.status_code == 200:
-                        st.session_state[cache_key] = r.content
-                        ct = r.headers.get("content-type", "video/mp4")
-                        st.session_state[f"video_ct_{video_id}"] = ct
-                    else:
-                        st.session_state[cache_key] = None
-                except:
-                    st.session_state[cache_key] = None
-            return st.session_state.get(cache_key)
-
         def render_card(scene, rank):
             start_time = scene['start_time']
             end_time = scene['end_time']
@@ -181,11 +165,8 @@ if is_searched:
                 <div class='card-title'>{vname}</div>
             """, unsafe_allow_html=True)
 
-            video_bytes = fetch_video_bytes(vname)
-            if video_bytes:
-                st.video(video_bytes, start_time=int(start_time))
-            else:
-                st.warning(f"Video {vname} not found on server")
+            video_url = f"{BACKEND_URL}/video/{vname}"
+            st.video(video_url, start_time=int(start_time))
 
             st.markdown(f"""
                 <div class='timecode-area'>
