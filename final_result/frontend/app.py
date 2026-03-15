@@ -315,7 +315,7 @@ if not is_searched:
     # 3. The subtitle strictly centered UNDER THE SEARCH BAR
     st.markdown(f"""
     <div class="hero-subtitle-wrapper">
-        <div class="hero-subtitle">Семантический поиск по видеоконтенту. Fine-tuned BGE-M3 + Answer Augmentation. Score: 0.577 (1st place).</div>
+        <div class="hero-subtitle">Интеллектуальный поиск фрагментов видео по текстовому запросу на русском и английском языках.</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -412,25 +412,33 @@ if is_searched:
             end_time = scene.get('adapted_end', 0.0)
             vname = Path(scene['video_file']).stem
             
-            is_answer = 'answer' in scene.get('chunk_type', 'window')
-            pill_html = "<div class='pill-answer'>GT Anchor</div>" if is_answer else "<div class='pill-window'>Window ±P75</div>"
-            bar_fill = "timecode-fill-primary" if is_answer else "timecode-fill-neutral"
+            bar_fill = "timecode-fill-primary"
+            pill_html = ""
             
             st.markdown(f"""
             <div class='glass-card'>
                 <div class='card-rank'>0{rank}</div>
                 <div class='card-title'>{vname}</div>
-                <div>{pill_html}</div>
             """, unsafe_allow_html=True)
             
             video_url = f"{BACKEND_URL}/video/{vname}"
             st.components.v1.html(f"""
-                <video width="100%" controls style="border-radius:10px;">
+                <video id="vid_{rank}" width="100%" controls style="border-radius:10px;">
+                    <source src="{video_url}" type="video/webm">
                     <source src="{video_url}" type="video/mp4">
+                    <source src="{video_url}" type="video/x-matroska">
+                    Your browser does not support the video tag.
                 </video>
                 <script>
-                    var v = document.querySelector('video');
-                    if(v) {{ v.currentTime = {start_time}; }}
+                    var vid = document.getElementById('vid_{rank}');
+                    if(vid) {{
+                        vid.addEventListener('loadedmetadata', function() {{
+                            vid.currentTime = {start_time};
+                        }});
+                        vid.addEventListener('timeupdate', function() {{
+                            if(vid.currentTime >= {end_time}) vid.pause();
+                        }});
+                    }}
                 </script>
             """, height=250)
                 

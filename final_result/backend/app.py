@@ -207,13 +207,16 @@ def search(q: str = Query(..., description="Search query"), top_k: int = 5):
 @app.get("/video/{video_id}")
 def stream_video(video_id: str):
     """Stream video file by video_id (e.g. video_02578eb3)."""
-    # Find video file on disk
-    for ext in [".mp4", ".webm", ".mkv"]:
+    media_types = {".mp4": "video/mp4", ".webm": "video/webm", ".mkv": "video/x-matroska"}
+    for ext, mtype in media_types.items():
         path = Path(VIDEO_DIR) / f"{video_id}{ext}"
         if path.exists():
-            media_type = {"mp4": "video/mp4", "webm": "video/webm", "mkv": "video/x-matroska"}
-            return FileResponse(str(path), media_type=media_type.get(ext[1:], "video/mp4"))
-    raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
+            return FileResponse(
+                str(path),
+                media_type=mtype,
+                headers={"Accept-Ranges": "bytes"},
+            )
+    raise HTTPException(status_code=404, detail=f"Video {video_id} not found in {VIDEO_DIR}")
 
 
 @app.get("/health")
