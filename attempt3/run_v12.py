@@ -70,6 +70,14 @@ def main():
     # 2. Answer augmentation from train data
     import pandas as pd
     train = pd.read_csv('data/train_qa.csv')
+    
+    # --- Boundary Truncation Hack ---
+    train['length'] = train['end'] - train['start']
+    median_len = train['length'].median()
+    p75_len = train['length'].quantile(0.75)
+    log.info(f"Target window sizes: Median={median_len:.1f}s, P75={p75_len:.1f}s. Using target_window=P75")
+    TARGET_WINDOW = p75_len
+
     aug_count = 0
     for _, row in train.iterrows():
         answer = str(row.get('answer_en', '')).strip()
@@ -95,6 +103,15 @@ def main():
     # --- Search with HyDE ---
     data = load_index('index_v12.pkl')
     model = get_embed_model()
+
+    # Load FlashRank
+    try:
+        from flashrank import Ranker, RerankRequest
+        ranker = Ranker(model_name='ms-marco-MultiBERT-L-12')
+        log.info('FlashRank loaded for reranking')
+    except ImportError:
+        ranker = None
+        log.warning('FlashRank not found, using pure cosine')
 
     # Build train question embeddings for HyDE
     train_qs = train.drop_duplicates('question_id')
@@ -130,14 +147,29 @@ def main():
         if best_sim > 0.7 and str(train_answers[best_idx]) != 'nan':
             answer_text = str(train_answers[best_idx])[:500]
             answer_emb = model.encode([answer_text], normalize_embeddings=True)[0]
-            mixed = 0.6 * qv + 0.4 * answer_emb
+            
+            # Dynamic HyDE weight: more similar matches use more of the answer vector
+            ans_weight = np.clip(0.2 + (best_sim - 0.7) * (0.5 / 0.3), 0.2, 0.7)
+            query_weight = 1.0 - ans_weight
+            
+            mixed = query_weight * qv + ans_weight * answer_emb
             mixed = mixed / np.linalg.norm(mixed)
             search_vec = mixed
             hyde_used += 1
         else:
             search_vec = qv
 
-        cands = search_index(search_vec, data, top_k=10)
+        cands = search_index(search_vec, data, top_k=50)
+
+        # --- FlashRank Reranker ---
+        if ranker is not None:
+            try:
+                passages = [{'id': i, 'text': c['text'][:512]} for i, c in enumerate(cands)]
+                ranked = ranker.rerank(RerankRequest(query=q['query'], passages=passages))
+                cands = [cands[int(r['id'])] for r in ranked]
+            except Exception as e:
+                log.warning(f'Reranker failed: {e}')
+
         seen = set()
         results = []
         for c in cands:
@@ -157,9 +189,19 @@ def main():
                 vname = Path(r['video_file']).stem
                 m = re.search(r'(video_[a-f0-9]+)', vname)
                 vname = m.group(1) if m else vname
+                
+                # --- Dynamic Boundary Adjustment ---
                 row[f'video_file_{si}'] = vname
-                row[f'start_{si}'] = round(max(0, r['start_time'] - PAD), 1)
-                row[f'end_{si}'] = round(r['end_time'] + PAD, 1)
+                if r.get('chunk_type') == 'answer_aug':
+                    # Trust actual bounds from exact train ground truth (answer_aug)
+                    row[f'start_{si}'] = round(r['start_time'], 1)
+                    row[f'end_{si}'] = round(r['end_time'], 1)
+                else:
+                    # Windows use P75 approximation
+                    center = (r['start_time'] + r['end_time']) / 2.0
+                    half_window = TARGET_WINDOW / 2.0
+                    row[f'start_{si}'] = round(max(0, center - half_window), 1)
+                    row[f'end_{si}'] = round(center + half_window, 1)
             else:
                 row[f'video_file_{si}'] = 'video_02578eb3'
                 row[f'start_{si}'] = 0.0
