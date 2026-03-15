@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./data:/app/data
+      - ./new_transcripts.pkl:/app/new_transcripts.pkl
+      - ./bge-m3-finetuned:/app/bge-m3-finetuned
+    environment:
+      - DATA_DIR=data
+      - MODEL_PATH=bge-m3-finetuned
+      - TRANSCRIPTS_PATH=new_transcripts.pkl
+      - VIDEO_DIR=data/video-rag/videos
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - BACKEND_URL=http://backend:8765
+    depends_on:
+      - backend
